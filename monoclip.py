@@ -35,10 +35,10 @@ class SAM3Encoder(nn.Module):
         super().__init__()
         print(f"Loading SAM 3 Image Model from: {checkpoint_path}")
         
-        # FIX 2: لود روی CPU
+        # FIX 2: لود روی CPU (حیاتی برای رفع ارور CUDA unknown error)
         self.model = build_sam3_image_model(
             checkpoint_path=checkpoint_path,
-            device=LOAD_DEVICE,  # <--- FIX: لود روی CPU برای دور زدن کرش
+            device=LOAD_DEVICE,  # <--- این خط جلوی کرش را می‌گیرد
             eval_mode=True,
             enable_segmentation=False,
             enable_inst_interactivity=False
@@ -46,7 +46,7 @@ class SAM3Encoder(nn.Module):
         
         # --- FIX 3: انتقال مدل به GPU بعد از لود ---
         if DEVICE == 'cuda':
-            self.model.to(DEVICE) # انتقال مدل به GPU بعد از رفع خطر کرش
+            self.model.to(DEVICE) # انتقال مدل به GPU بعد از عبور از منطقه خطر
 
         # --- FIX 4: Smart Backbone Detection ---
         print(f'DEBUG: SAM3 Backbone Type: {type(self.model.backbone)}')
@@ -64,7 +64,9 @@ class SAM3Encoder(nn.Module):
             param.requires_grad = False
 
     def forward(self, x):
-        # ... (کدهای forward بدون تغییر باقی می‌مانند) ...
+        """
+        ورودی: تنسور تصویر (B, 3, H, W)
+        """
         # --- FIX 3 & 4: Resize 1008 + Dummy Captions ---
         batch_size = x.shape[0]
         dummy_captions = [''] * batch_size
@@ -142,7 +144,8 @@ class MonoCLIP(nn.Module):
         with torch.no_grad():
             dummy = torch.randn(1, 3, 1008, 1008).to(DEVICE)
             out = self.sam_encoder(dummy)
-            self.visual_dim = out.shape[2] # FINAL FIX: اصلاح بعد به 2 (1024)
+            # FIX 5: استفاده از اندیس 2 برای بعد فیچر (1024)
+            self.visual_dim = out.shape[2] 
             print(f"✅ SAM 3 Output Shape: {out.shape}")
             print(f"✅ Visual Dimension: {self.visual_dim}")
 
@@ -157,12 +160,12 @@ class MonoCLIP(nn.Module):
     def forward(self, x):
         img_f = self.sam_encoder(x)
         
-        # --- FIX 5: Reshape 3D features to 4D dense feature map (1x1 spatial) ---
+        # --- FIX 6: Reshape 3D features to 4D dense feature map (1x1 spatial) ---
         if img_f.dim() == 3:
             # Output is (B, 1, D). Convert to (B, D, 1, 1).
             img_f = img_f.transpose(1, 2)  # (B, D, 1)
             img_f = img_f.unsqueeze(-1)    # (B, D, 1, 1)
-        # --- END FIX 5 ---
+        # --- END FIX 6 ---
         
         img_f = img_f / (img_f.norm(dim=1, keepdim=True) + 1e-6)
 
