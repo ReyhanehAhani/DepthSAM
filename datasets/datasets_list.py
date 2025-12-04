@@ -7,17 +7,18 @@ import torch
 import time
 import cv2
 from PIL import ImageFile
-from transform_list import RandomCropNumpy,EnhancedCompose,RandomColor,RandomHorizontalFlip,ArrayToTensorNumpy,Normalize,CropNumpy
+from transform_list import RandomCropNumpy, EnhancedCompose, RandomColor, RandomHorizontalFlip, ArrayToTensorNumpy, Normalize, CropNumpy
 from torchvision import transforms
 import pdb
-import os # <--- اضافه شدن os برای مسیردهی
+import os  # FIX: اضافه شدن os برای مدیریت مسیرها
+
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 def _is_pil_image(img):
     return isinstance(img, Image.Image)
 
 class MyDataset(data.Dataset):
-    def __init__(self, args, train=True, return_filename = False):
+    def __init__(self, args, train=True, return_filename=False):
         self.use_dense_depth = args.use_dense_depth
         if train is True:
             if args.dataset == 'KITTI':
@@ -25,7 +26,7 @@ class MyDataset(data.Dataset):
                 self.angle_range = (-1, 1)
                 self.depth_scale = 256.0
             elif args.dataset == 'NYU':
-                self.datafile = args.trainfile_nyu 
+                self.datafile = args.trainfile_nyu
                 self.angle_range = (-2.5, 2.5)
                 self.depth_scale = 1000.0
                 args.height = 416
@@ -39,85 +40,88 @@ class MyDataset(data.Dataset):
                 self.depth_scale = 1000.0
                 args.height = 416
                 args.width = 544
+        
         self.train = train
         self.transform = Transformer(args)
         self.args = args
-        # --- FIX: استفاده از data_path ورودی برای حالت تست و ترین (حل مشکل مسیردهی) ---
+
+        # --- FIX: مدیریت صحیح مسیرها برای جلوگیری از Hardcoding ---
         if train:
-            # در حالت آموزش، از /train در انتهای مسیر استفاده می‌شود
+            # در حالت آموزش معمولاً پوشه train اضافه می‌شود
             self.data_path = self.args.data_path + '/train'
         else:
-            # در حالت تست، از همان مسیر ورودی استفاده می‌کنیم (نیازی به hardcode نیست)
-            self.data_path = self.args.data_path # <--- FIX
+            # در حالت تست، دقیقاً از مسیر ورودی استفاده می‌کنیم
+            self.data_path = self.args.data_path
+        
         self.return_filename = return_filename
         with open(self.datafile, 'r') as f:
             self.fileset = f.readlines()
         self.fileset = sorted(self.fileset)
 
     def __getitem__(self, index):
-        # حذف spaceهای اضافی و تقسیم‌بندی خط به دو ستون (RGB و GT)
-        divided_file = [f.strip() for f in self.fileset[index].split() if f.strip()]
-        
-        # اگر خط کمتر از ۲ ستون دارد، ارور می‌دهد. (اگرچه باید درست باشد)
-        if len(divided_file) < 2:
-            raise IndexError(f"List line is incomplete: {self.fileset[index].strip()}")
+        # --- FIX: خواندن ایمن خطوط فایل لیست (جلوگیری از IndexError) ---
+        line = self.fileset[index].strip()
+        divided_file = [f.strip() for f in line.split() if f.strip()]
 
-        # Opening image files.   rgb: input color image, gt: sparse depth map
+        if len(divided_file) < 2:
+            # اگر خط خراب بود، تلاش می‌کنیم خطا ندهد و رد شود یا ارور واضح بدهد
+            raise IndexError(f"List line is incomplete: {line}")
+
         rgb_name = divided_file[0]
         gt_name = divided_file[1]
 
         # ساخت مسیر کامل فایل RGB
         rgb_file = os.path.join(self.data_path, rgb_name)
         rgb = Image.open(rgb_file)
+        
         gt = False
         gt_dense = False
 
-        if (self.train is False):
-            # --- FIX: ساده‌سازی استخراج ID فایل (حل Index Error) ---
-            # ما ID فایل را فقط با حذف پسوند (.jpg) استخراج می‌کنیم
-            filename = rgb_name.split(".")[0].strip()
-            # --- END FIX ---
-            
+        # --- استخراج ID فایل (نام بدون پسوند) ---
+        # این کار برای ذخیره نتایج با نام درست ضروری است
+        filename = rgb_name.split(".")[0].strip()
+
+        if self.train is False:
+            # --- حالت TEST ---
             if self.args.dataset == 'KITTI':
-                # Considering missing gt in Eigen split
                 if gt_name != 'None':
                     gt_file = os.path.join(self.data_path, 'data_depth_annotated', gt_name)
                     gt = Image.open(gt_file)
                     if self.use_dense_depth is True:
                         gt_dense_file = os.path.join(self.data_path, 'data_depth_annotated', divided_file[2])
                         gt_dense = Image.open(gt_dense_file)
-                else:
-                    pass
             elif self.args.dataset == 'NYU':
-                gt_file = os.path.join(self.data_path, gt_name) # مسیردهی بهینه
+                # مسیردهی ساده برای NYU Test
+                gt_file = os.path.join(self.data_path, gt_name)
                 gt = Image.open(gt_file)
                 if self.use_dense_depth is True:
                     gt_dense_file = os.path.join(self.data_path, divided_file[2])
                     gt_dense = Image.open(gt_dense_file)
 
-        else: # حالت train
+        else:
+            # --- حالت TRAIN ---
             angle = np.random.uniform(self.angle_range[0], self.angle_range[1])
             if self.args.dataset == 'KITTI':
                 gt_file = os.path.join(self.data_path, 'data_depth_annotated', gt_name)
                 if self.use_dense_depth is True:
                     gt_dense_file = os.path.join(self.data_path, 'data_depth_annotated', divided_file[2])
             elif self.args.dataset == 'NYU':
-                gt_file = os.path.join(self.data_path, gt_name) # مسیردهی بهینه
+                gt_file = os.path.join(self.data_path, gt_name)
                 if self.use_dense_depth is True:
                     gt_dense_file = os.path.join(self.data_path, divided_file[2])
             
-            gt = Image.open(gt_file)         
+            gt = Image.open(gt_file)
             rgb = rgb.rotate(angle, resample=Image.BILINEAR)
             gt = gt.rotate(angle, resample=Image.NEAREST)
             if self.use_dense_depth is True:
-                gt_dense = Image.open(gt_dense_file) 
+                gt_dense = Image.open(gt_dense_file)
                 gt_dense = gt_dense.rotate(angle, resample=Image.NEAREST)
 
-        # cropping and normalizing logic (remains unchanged)
+        # --- منطق Crop و تنظیم ابعاد ---
         if self.args.dataset == 'KITTI':
             h = rgb.height
             w = rgb.width
-            bound_left = (w - 1216)//2
+            bound_left = (w - 1216) // 2
             bound_right = bound_left + 1216
             bound_top = h - 352
             bound_bottom = bound_top + 352
@@ -134,27 +138,31 @@ class MyDataset(data.Dataset):
                 bound_bottom = 480
         
         if (self.args.dataset == 'NYU' and (self.train is False) and (self.return_filename is False)):
-            rgb = rgb.crop((40+20,42+14,616-12,474-2))
+            rgb = rgb.crop((40+20, 42+14, 616-12, 474-2))
         else:
-            rgb = rgb.crop((bound_left,bound_top,bound_right,bound_bottom))
+            rgb = rgb.crop((bound_left, bound_top, bound_right, bound_bottom))
 
-        rgb.save("vis.jpeg")
-        rgb = np.asarray(rgb, dtype=np.float32)/255.0
+        # ذخیره موقت برای دیباگ (اختیاری)
+        # rgb.save("vis.jpeg")
+
+        # تبدیل به Numpy و تقسیم بر 255 (تبدیل به بازه 0-1)
+        rgb = np.asarray(rgb, dtype=np.float32) / 255.0
 
         if _is_pil_image(gt):
-            gt = gt.crop((bound_left,bound_top,bound_right,bound_bottom))
-            gt = (np.asarray(gt, dtype=np.float32))/self.depth_scale
+            gt = gt.crop((bound_left, bound_top, bound_right, bound_bottom))
+            gt = (np.asarray(gt, dtype=np.float32)) / self.depth_scale
             gt = np.expand_dims(gt, axis=2)
             gt = np.clip(gt, 0, self.args.max_depth)
+        
         if self.use_dense_depth is True:
             if _is_pil_image(gt_dense):
-                gt_dense = gt_dense.crop((bound_left,bound_top,bound_right,bound_bottom))
-                gt_dense = (np.asarray(gt_dense, dtype=np.float32))/self.depth_scale
+                gt_dense = gt_dense.crop((bound_left, bound_top, bound_right, bound_bottom))
+                gt_dense = (np.asarray(gt_dense, dtype=np.float32)) / self.depth_scale
                 gt_dense = np.expand_dims(gt_dense, axis=2)
                 gt_dense = np.clip(gt_dense, 0, self.args.max_depth)
-                gt_dense = gt_dense * (gt.max()/gt_dense.max())
+                gt_dense = gt_dense * (gt.max() / gt_dense.max())
 
-        
+        # اعمال Transforms نهایی (شامل Normalization)
         rgb, gt, gt_dense = self.transform([rgb] + [gt] + [gt_dense], self.train)
         
         if self.return_filename is True:
@@ -165,34 +173,43 @@ class MyDataset(data.Dataset):
     def __len__(self):
         return len(self.fileset)
 
+
 class Transformer(object):
     def __init__(self, args):
         if args.dataset == 'KITTI':
             self.train_transform = EnhancedCompose([
-                RandomCropNumpy((args.height,args.width)),
+                RandomCropNumpy((args.height, args.width)),
                 RandomHorizontalFlip(),
                 [RandomColor(multiplier_range=(0.9, 1.1)), None, None],
                 ArrayToTensorNumpy(),
                 [transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), None, None]
             ])
             self.test_transform = EnhancedCompose([
-                CropNumpy((args.height,args.width)),
+                CropNumpy((args.height, args.width)),
                 ArrayToTensorNumpy(),
                 [transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), None, None]
             ])
         elif args.dataset == 'NYU':
             self.train_transform = EnhancedCompose([
-                RandomCropNumpy((args.height,args.width)),
+                RandomCropNumpy((args.height, args.width)),
                 RandomHorizontalFlip(),
-                [RandomColor(multiplier_range=(0.8, 1.2),brightness_mult_range=(0.75, 1.25)), None, None],
+                [RandomColor(multiplier_range=(0.8, 1.2), brightness_mult_range=(0.75, 1.25)), None, None],
                 ArrayToTensorNumpy(),
-                [transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), None, None]
+                [Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), None, None]
             ])
+            
+            # --- FIX CRITICAL: تنظیم درست برای تست NYU ---
             self.test_transform = EnhancedCompose([
-                #CropNumpy((args.height,args.width)),
+                # CropNumpy((args.height,args.width)), # معمولاً در تست NYU کراپ نمی‌کنیم
                 ArrayToTensorNumpy(),
-                [transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), None, None]
+                
+                # نکته مهم: Normalize باید به عنوان یک تابع مستقل باشد، نه داخل لیست [ ] با None
+                # چون کلاس EnhancedCompose ماژول‌های داخل لیست را فقط روی عضو متناظر اجرا می‌کند
+                # اما Normalize ما (در transform_list.py) طوری نوشته شده که کل لیست تصاویر را می‌گیرد
+                # و فقط روی RGB اعمال می‌کند. پس باید به تنهایی پاس داده شود.
+                Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ])
+
     def __call__(self, images, train=True):
         if train is True:
             return self.train_transform(images)

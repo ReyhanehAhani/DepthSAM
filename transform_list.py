@@ -7,8 +7,11 @@ import scipy
 import scipy.ndimage
 import numbers
 import collections
+from collections import abc # FIX 1: ایمپورت abc برای سازگاری با Python 3.10+
 from itertools import permutations
 import pdb
+from PIL import Image # FIX 2: ایمپورت PIL.Image
+
 def _is_numpy_image(img):
     return isinstance(img, np.ndarray) and (img.ndim in {2, 3})
 
@@ -31,16 +34,12 @@ class EnhancedCompose(object):
     """Composes several transforms together.
     Args:
         transforms (List[Transform]): list of transforms to compose.
-    Example:
-        >>> transforms.Compose([
-        >>>     transforms.CenterCrop(10),
-        >>>     transforms.ToTensor(),
-        >>> ])
     """
     def __init__(self, transforms):
         self.transforms = transforms
     def __call__(self, img):
         for t in self.transforms:
+            # FIX 3: استفاده از collections.abc.Sequence
             if isinstance(t, collections.abc.Sequence):
                 assert isinstance(img, collections.abc.Sequence) and len(img) == len(
                     t), "size of image group and transform group does not fit"
@@ -65,6 +64,7 @@ class Merge(object):
     def __init__(self, axis=-1):
         self.axis = axis
     def __call__(self, images):
+        # FIX 3: استفاده از collections.abc.Sequence
         if isinstance(images, collections.abc.Sequence) or isinstance(images, np.ndarray):
             assert all([isinstance(i, np.ndarray)
                         for i in images]), 'only numpy array is supported'
@@ -82,13 +82,14 @@ class Normalize(object):
         self.mean = mean
         self.std = std
     def __call__(self, images):
-        for tensor in images:
-            # check non-existent file
-            if _is_tensor_image is False:
-                continue
+        tensor = images[0] # ما فقط RGB (که در اندیس 0 است) را نرمال می‌کنیم.
+        
+        # FIX 4 (CRITICAL): حذف چک کردن غلط و اعمال مستقیم نرمال‌سازی روی تنسور RGB
+        if torch.is_tensor(tensor) and tensor.ndimension() == 3:
             for t, m, s in zip(tensor, self.mean, self.std):
                 t.sub_(m).div_(s)
-        return images
+        
+        return images # تمام تصاویر (شامل عمق) را برمی‌گردانیم.
 
 class ArrayToTensorNumpy(object):
     """Converts a list of numpy.ndarray (H x W x C) to torch.FloatTensor of shape (C x H x W) """
