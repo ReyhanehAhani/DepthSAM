@@ -6,9 +6,9 @@
 #SBATCH --account=def-jieliang
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:nvidia_h100_80gb_hbm3_2g.20gb:1  # <--- این همان خط جادویی است!
-#SBATCH --cpus-per-task=4                            # <--- کاهش به 4 طبق اسکریپت موفق
-#SBATCH --mem=32G                                    # <--- کاهش به 32 طبق اسکریپت موفق
+#SBATCH --gres=gpu:nvidia_h100_80gb_hbm3_2g.20gb:1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=64G
 
 # 1. ساخت پوشه لاگ
 mkdir -p slurm_logs_infer
@@ -16,24 +16,29 @@ mkdir -p slurm_logs_infer
 echo "==== Job started at: $(date) ===="
 echo "Node: $(hostname)"
 
-# 2. لود ماژول‌ها (طبق اسکریپت موفق شما)
+# 2. لود ماژول‌ها
 echo "==== Purging and Loading Modules ===="
 module --force purge
-module load gcc opencv
+# استفاده از StdEnv جدیدتر برای سازگاری بهتر با H100 و Python 3.12
+module load StdEnv/2023
+module load gcc
+module load cuda
+module load opencv # <--- FIX CRITICAL: بازگرداندن این خط برای رفع مشکل Dummy Package
 
-# 3. چک کردن وضعیت کارت گرافیک
-echo "==== Checking GPU Status ===="
-nvidia-smi
-echo "============================="
-
-# 4. تنظیم Threading
+# 3. تنظیم Threading (برای جلوگیری از کرش BLIS/Numpy)
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export BLIS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export CUDA_VISIBLE_DEVICES=0
 
-# 5. فعال‌سازی محیط مجازی
+# 4. فعال‌سازی محیط مجازی
 echo "==== Activating Virtual Environment ===="
 source /home/ram112/projects/def-jieliang/ram112/PyTorch/bin/activate
+
+# 5. چک کردن وضعیت OpenCV (دیباگ)
+echo "==== Checking OpenCV Import ===="
+# این خط چک می‌کند که آیا cv2 قبل از اجرای اصلی کار می‌کند یا خیر
+python3 -c "import cv2; print(f'OpenCV Version: {cv2.__version__}')" || echo "WARNING: OpenCV import failed in check, but proceeding..."
 
 # 6. تنظیم مسیر کتابخانه‌ها
 echo "==== Setting PYTHONPATH ===="
