@@ -6,9 +6,9 @@
 #SBATCH --account=def-jieliang
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gpus-per-task=nvidia_h100_80gb_hbm3_2g.20gb:1
-#SBATCH --cpus-per-task=12
-#SBATCH --mem=64G
+#SBATCH --gres=gpu:nvidia_h100_80gb_hbm3_2g.20gb:1  # <--- این همان خط جادویی است!
+#SBATCH --cpus-per-task=4                            # <--- کاهش به 4 طبق اسکریپت موفق
+#SBATCH --mem=32G                                    # <--- کاهش به 32 طبق اسکریپت موفق
 
 # 1. ساخت پوشه لاگ
 mkdir -p slurm_logs_infer
@@ -16,32 +16,33 @@ mkdir -p slurm_logs_infer
 echo "==== Job started at: $(date) ===="
 echo "Node: $(hostname)"
 
-# 2. FIX 1: پاک‌سازی و لود ماژول‌های ضروری
+# 2. لود ماژول‌ها (طبق اسکریپت موفق شما)
 echo "==== Purging and Loading Modules ===="
 module --force purge
-module load StdEnv/2023
-module load gcc cuda 
-module load opencv
+module load gcc opencv
 
-# 3. FIX 2: کنترل Threading برای جلوگیری از BLIS Abort
-# این خطوط تضمین می‌کنند که BLAS/NumPy/PyTorch فقط از 12 هسته‌ی درخواستی استفاده کنند.
-export OMP_NUM_THREADS=12
-export MKL_NUM_THREADS=12
-export BLIS_NUM_THREADS=12
-export CUDA_VISIBLE_DEVICES=0 # اجبار به دیدن GPU 0
+# 3. چک کردن وضعیت کارت گرافیک
+echo "==== Checking GPU Status ===="
+nvidia-smi
+echo "============================="
 
-# 4. فعال‌سازی محیط مجازی
+# 4. تنظیم Threading
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export BLIS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+# 5. فعال‌سازی محیط مجازی
 echo "==== Activating Virtual Environment ===="
 source /home/ram112/projects/def-jieliang/ram112/PyTorch/bin/activate
 
-# 5. تنظیم مسیر کتابخانه Triton/Decord/pycocotools
+# 6. تنظیم مسیر کتابخانه‌ها
 echo "==== Setting PYTHONPATH ===="
 export PYTHONPATH=/scratch/ram112/python_libs:$PYTHONPATH
 
-# 6. رفتن به پوشه کد
+# 7. رفتن به پوشه کد
 cd /home/ram112/projects/def-jieliang/ram112/All_DEPTHCLIP/DepthCLIP/DepthCLIP_code
 
-# 7. اجرای تست
+# 8. اجرای تست
 echo "==== Running Inference with SAM 3 ===="
 python3 eval.py \
   --evaluate \
