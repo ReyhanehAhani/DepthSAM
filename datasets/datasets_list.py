@@ -18,7 +18,10 @@ def _is_pil_image(img):
     return isinstance(img, Image.Image)
 
 class MyDataset(data.Dataset):
+    # ... (کلاس MyDataset بدون تغییر در منطق) ...
+    # (همه FIX‌ها در این کلاس حفظ می‌شوند)
     def __init__(self, args, train=True, return_filename=False):
+        # ... (init logic remains the same) ...
         self.use_dense_depth = args.use_dense_depth
         if train is True:
             if args.dataset == 'KITTI':
@@ -45,14 +48,13 @@ class MyDataset(data.Dataset):
         self.transform = Transformer(args)
         self.args = args
 
-        # مسیر دقیقاً همانی است که شما در train.sh وارد می‌کنید.
         self.data_path = self.args.data_path 
         
         self.return_filename = return_filename
         with open(self.datafile, 'r') as f:
             self.fileset = f.readlines()
         self.fileset = sorted(self.fileset)
-
+    
     def __getitem__(self, index):
         line = self.fileset[index].strip()
         divided_file = [f.strip() for f in line.split() if f.strip()]
@@ -63,16 +65,7 @@ class MyDataset(data.Dataset):
         rgb_name = divided_file[0]
         gt_name = divided_file[1]
 
-        # ساخت مسیر کامل فایل RGB
         rgb_file = os.path.join(self.data_path, rgb_name)
-        
-        # --- Debugging Help ---
-        if not os.path.exists(rgb_file):
-            # Fallback check just in case
-            possible_path = os.path.join(self.data_path, 'train', rgb_name)
-            if not os.path.exists(possible_path):
-                 print(f"❌ ERROR: File not found: {rgb_file}")
-
         rgb = Image.open(rgb_file)
         
         gt = False
@@ -80,52 +73,43 @@ class MyDataset(data.Dataset):
 
         filename = rgb_name.split(".")[0].strip()
 
-        # --- بخش اصلاح شده برای هندل کردن ستون‌های ناقص ---
+        # ... (Train/Test logic and Cropping remain the same) ...
         if self.train is False:
-            # --- حالت TEST ---
             if self.args.dataset == 'KITTI':
                 if gt_name != 'None':
                     gt_file = os.path.join(self.data_path, 'data_depth_annotated', gt_name)
                     gt = Image.open(gt_file)
                     if self.use_dense_depth is True:
-                        # FIX: چک کردن وجود ستون سوم
                         if len(divided_file) > 2:
                             gt_dense_file = os.path.join(self.data_path, 'data_depth_annotated', divided_file[2])
                         else:
-                            gt_dense_file = gt_file # Fallback
+                            gt_dense_file = gt_file
                         gt_dense = Image.open(gt_dense_file)
             elif self.args.dataset == 'NYU':
                 gt_file = os.path.join(self.data_path, gt_name)
                 gt = Image.open(gt_file)
                 if self.use_dense_depth is True:
-                    # FIX: چک کردن وجود ستون سوم
                     if len(divided_file) > 2:
                         gt_dense_file = os.path.join(self.data_path, divided_file[2])
                     else:
-                        gt_dense_file = gt_file # Fallback
+                        gt_dense_file = gt_file
                     gt_dense = Image.open(gt_dense_file)
-
         else:
-            # --- حالت TRAIN ---
             angle = np.random.uniform(self.angle_range[0], self.angle_range[1])
             if self.args.dataset == 'KITTI':
                 gt_file = os.path.join(self.data_path, 'data_depth_annotated', gt_name)
                 if self.use_dense_depth is True:
-                     # FIX: چک کردن وجود ستون سوم
                     if len(divided_file) > 2:
                         gt_dense_file = os.path.join(self.data_path, 'data_depth_annotated', divided_file[2])
                     else:
-                        gt_dense_file = gt_file # Fallback
-
+                        gt_dense_file = gt_file
             elif self.args.dataset == 'NYU':
                 gt_file = os.path.join(self.data_path, gt_name)
                 if self.use_dense_depth is True:
-                    # FIX: چک کردن وجود ستون سوم (جلوگیری از IndexError)
                     if len(divided_file) > 2:
                         gt_dense_file = os.path.join(self.data_path, divided_file[2])
                     else:
-                        # اگر ستون سوم نبود، از همان فایل GT استفاده کن
-                        gt_dense_file = gt_file 
+                        gt_dense_file = gt_file
             
             gt = Image.open(gt_file)
             rgb = rgb.rotate(angle, resample=Image.BILINEAR)
@@ -133,8 +117,6 @@ class MyDataset(data.Dataset):
             if self.use_dense_depth is True:
                 gt_dense = Image.open(gt_dense_file)
                 gt_dense = gt_dense.rotate(angle, resample=Image.NEAREST)
-
-        # -----------------------------------------------------
 
         if self.args.dataset == 'KITTI':
             h = rgb.height
@@ -206,20 +188,24 @@ class Transformer(object):
                 RandomHorizontalFlip(),
                 [RandomColor(multiplier_range=(0.9, 1.1)), None, None],
                 ArrayToTensorNumpy(),
-                [transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), None, None]
+                # FIX: حذف transforms.Normalize و استفاده از ساختار مستقل (اگرچه هنوز در لیست است)
+                [Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), None, None]
             ])
             self.test_transform = EnhancedCompose([
                 CropNumpy((args.height, args.width)),
                 ArrayToTensorNumpy(),
-                [transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), None, None]
+                # FIX: حذف transforms.Normalize
+                Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ])
         elif args.dataset == 'NYU':
+            # --- FIX CRITICAL: اصلاح ساختار Normalization در حالت TRAIN ---
             self.train_transform = EnhancedCompose([
                 RandomCropNumpy((args.height, args.width)),
                 RandomHorizontalFlip(),
                 [RandomColor(multiplier_range=(0.8, 1.2), brightness_mult_range=(0.75, 1.25)), None, None],
                 ArrayToTensorNumpy(),
-                [Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), None, None]
+                # FIX: اینجا Normalization را به عنوان یک تابع مستقل قرار می‌دهیم!
+                Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ])
             
             self.test_transform = EnhancedCompose([
