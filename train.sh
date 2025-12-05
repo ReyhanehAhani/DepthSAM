@@ -2,7 +2,7 @@
 #SBATCH --job-name=SAM3_Train_Adapter
 #SBATCH --output=slurm_logs_train/train_%j.out
 #SBATCH --error=slurm_logs_train/train_%j.err
-#SBATCH --time=10:00:00
+#SBATCH --time=05:00:00
 #SBATCH --account=def-jieliang
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -42,7 +42,7 @@ cd /home/ram112/projects/def-jieliang/ram112/All_DEPTHCLIP/DepthCLIP/DepthCLIP_c
 # 7. اجرای آموزش با مسیر SCRATCH
 echo "==== Starting Training ===="
 python3 train.py \
-  --batch_size 8 \
+  --batch_size 4 \
   --epochs 50 \
   --lr 1e-3 \
   --data_path "/scratch/ram112/NYU_dataset" \
