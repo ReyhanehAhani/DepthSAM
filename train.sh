@@ -9,7 +9,6 @@
 #SBATCH --gres=gpu:nvidia_h100_80gb_hbm3_2g.20gb:1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=64G
-
 # 1. ساخت پوشه لاگ
 mkdir -p slurm_logs_train
 
