@@ -44,9 +44,9 @@ echo "==== Starting Training ===="
 python3 train.py \
   --batch_size 8 \
   --epochs 50 \
-  --lr 1e-4 \
+  --lr 1e-3 \
   --data_path "/scratch/ram112/NYU_dataset" \
   --trainfile_nyu "./datasets/my_test_list.txt" \
-  --save_path "/scratch/ram112/checkpoints_trained" # <--- FIX: مسیردهی به SCRATCH 
+  --save_path "/scratch/ram112/checkpoints_trained" 
 
 echo "==== Job finished at: $(date) ===="

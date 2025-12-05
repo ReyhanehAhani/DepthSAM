@@ -11,51 +11,101 @@ from tqdm import tqdm
 from monoclip import MonoCLIP
 from datasets.datasets_list import MyDataset
 
-# --- تابع Argument Parser (آرگومان‌ها) ---
+# --- 1. تنظیمات و آرگومان‌ها ---
 def get_args():
     parser = argparse.ArgumentParser(description='Train SAM-Enhanced DepthCLIP Adapter')
+    
+    # تنظیمات آموزش
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size') 
     parser.add_argument('--epochs', type=int, default=5, help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning Rate')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Learning Rate') # شروع با نرخ بالا
+    
+    # مسیرها
     parser.add_argument('--data_path', type=str, default="/scratch/ram112/NYU_dataset", help='Path to dataset')
     parser.add_argument('--trainfile_nyu', type=str, default="./datasets/my_test_list.txt", help='Path to train split') 
     parser.add_argument('--save_path', type=str, default="./checkpoints_trained", help='Where to save checkpoints')
     
-    # آرگومان‌های مورد نیاز MyDataset
+    # تنظیمات مدل و دیتاست
     parser.add_argument('--dataset', type=str, default='NYU')
     parser.add_argument('--use_dense_depth', action='store_true', default=True)
     parser.add_argument('--max_depth', type=float, default=10.0)
     parser.add_argument('--height', type=int, default=416)
     parser.add_argument('--width', type=int, default=544)
+    
+    # آرگومان‌های اضافی
     parser.add_argument('--trainfile_kitti', type=str, default="")
     parser.add_argument('--testfile_kitti', type=str, default="")
     parser.add_argument('--testfile_nyu', type=str, default="") 
     
     return parser.parse_args()
 
-# --- تابع زیان (Loss Function) ---
-class MaskedL1Loss(nn.Module):
+# --- 2. توابع زیان پیشرفته (Composite Loss) ---
+
+class GradientLoss(nn.Module):
+    """محاسبه خطای گرادیان برای حفظ لبه‌ها و ساختار تصویر"""
     def __init__(self):
-        super(MaskedL1Loss, self).__init__()
+        super(GradientLoss, self).__init__()
+
+    def forward(self, pred, target, mask):
+        # محاسبه گرادیان (تغییرات) در جهت X و Y
+        # تانسورها به شکل (B, C, H, W) هستند
         
+        # گرادیان افقی (X)
+        pred_dx = torch.abs(pred[:, :, :, :-1] - pred[:, :, :, 1:])
+        target_dx = torch.abs(target[:, :, :, :-1] - target[:, :, :, 1:])
+        mask_dx = mask[:, :, :, :-1] & mask[:, :, :, 1:] # ماسک مشترک
+        
+        # گرادیان عمودی (Y)
+        pred_dy = torch.abs(pred[:, :, :-1, :] - pred[:, :, 1:, :])
+        target_dy = torch.abs(target[:, :, :-1, :] - target[:, :, 1:, :])
+        mask_dy = mask[:, :, :-1, :] & mask[:, :, 1:, :] # ماسک مشترک
+
+        # محاسبه خطا فقط در جاهایی که ماسک معتبر است
+        if mask_dx.sum() > 0:
+            loss_dx = torch.abs(pred_dx - target_dx)[mask_dx].mean()
+        else:
+            loss_dx = 0
+
+        if mask_dy.sum() > 0:
+            loss_dy = torch.abs(pred_dy - target_dy)[mask_dy].mean()
+        else:
+            loss_dy = 0
+
+        return loss_dx + loss_dy
+
+class CompositeLoss(nn.Module):
+    """ترکیب L1 Loss و Gradient Loss"""
+    def __init__(self, alpha=1.0, beta=0.5):
+        super(CompositeLoss, self).__init__()
+        self.l1_loss = nn.L1Loss(reduction='none') 
+        self.grad_loss = GradientLoss()
+        self.alpha = alpha # وزن L1 (دقت کلی)
+        self.beta = beta   # وزن Gradient (دقت لبه‌ها)
+
     def forward(self, pred, target):
+        # 1. ساخت ماسک معتبر
         mask = target > 0.001
         
         if mask.sum() == 0:
-            # FIX: تانسور خالی با requires_grad=True
             return torch.tensor(0.0, device=pred.device).requires_grad_(True)
-            
-        diff = torch.abs(pred[mask] - target[mask])
-        
-        loss = torch.mean(diff)
-        
-        # FIX: اطمینان از ردیابی گرادیان در تانسور Loss
-        if not loss.requires_grad:
-             loss.requires_grad_(True) 
 
-        return loss
+        # 2. محاسبه L1 Loss (فقط روی پیکسل‌های معتبر)
+        pixel_loss = self.l1_loss(pred, target)
+        pixel_loss = pixel_loss[mask].mean()
 
-# --- Main Function ---
+        # 3. محاسبه Gradient Loss (برای تیز کردن لبه‌ها)
+        edge_loss = self.grad_loss(pred, target, mask)
+
+        # 4. ترکیب نهایی
+        total_loss = (self.alpha * pixel_loss) + (self.beta * edge_loss)
+        
+        # FIX: اطمینان از جریان گرادیان
+        if not total_loss.requires_grad:
+             total_loss.requires_grad_(True)
+
+        return total_loss
+
+# --- 3. بدنه اصلی (Main) ---
 def main():
     args = get_args()
     
@@ -64,12 +114,12 @@ def main():
     print("==== Initializing Model ====")
     model = MonoCLIP()
     
-    # 2. FREEZE کردن مدل 
+    # فریز کردن بخش‌های سنگین
     print("==== Freezing Backbones ====")
     for param in model.parameters():
         param.requires_grad = False
         
-    # 3. باز کردن قفل لایه‌های آداپتور
+    # باز کردن قفل بخش‌های آداپتور
     print("==== Unfreezing Adapters ====")
     trainable_params = []
     
@@ -89,18 +139,28 @@ def main():
     if device.type == 'cuda':
         model.to(device)
 
-    # 4. دیتالودر
+    # دیتالودر
     print("==== Loading Dataset ====")
     train_dataset = MyDataset(args, train=True) 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=args.batch_size, 
+        shuffle=True, 
+        num_workers=4, 
+        pin_memory=True
+    )
     
     print(f"Training on {len(train_dataset)} images.")
 
-    # 5. تنظیمات آموزش
-    criterion = MaskedL1Loss()
-    optimizer = optim.AdamW(trainable_params, lr=args.lr, weight_decay=1e-4)
+    # تنظیمات بهینه‌ساز و لاس ترکیبی
+    # استفاده از CompositeLoss به جای MaskedL1Loss ساده
+    criterion = CompositeLoss(alpha=1.0, beta=0.5)
     
-    # --- Training Loop ---
+    optimizer = optim.AdamW(trainable_params, lr=args.lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=3, verbose=True
+    )
+    
     print("==== Starting Training ====")
     model.train() 
     
@@ -116,29 +176,28 @@ def main():
             
             optimizer.zero_grad()
             
-            # --- FIX: Forward Pass با تضمین گرادیان و برش خروجی ---
-            # حذف torch.set_grad_enabled(True) از اینجا ضروری نیست، اما
-            # با حذف torch.no_grad() از monoclip.py، این خط الان باید به درستی کار کند.
-            pred_depth = model(rgb)
-            
-            # برش خروجی (Fix Batch Size Mismatch)
-            B = target.shape[0]
-            pred_depth = pred_depth[:B]
-            
-            # Loss
-            loss = criterion(pred_depth, target)
-            # --------------------------------------------------------
+            # --- FIX: جریان گرادیان امن ---
+            with torch.set_grad_enabled(True):
+                pred_depth = model(rgb)
+                
+                # برش خروجی برای تطابق با Batch Size
+                B = target.shape[0]
+                pred_depth = pred_depth[:B]
+                
+                loss = criterion(pred_depth, target)
 
-            # Backward
             loss.backward()
             optimizer.step()
             
             epoch_loss += loss.item()
-            
             progress_bar.set_postfix({'Loss': loss.item()})
             
         avg_loss = epoch_loss / len(train_loader)
-        print(f"\nEpoch [{epoch+1}/{args.epochs}] Completed. Avg Loss: {avg_loss:.4f} | Time: {time.time() - start_time:.1f}s")
+        
+        current_lr = optimizer.param_groups[0]['lr']
+        scheduler.step(avg_loss)
+        
+        print(f"\nEpoch [{epoch+1}/{args.epochs}] Completed. Avg Loss: {avg_loss:.4f} | LR: {current_lr:.6f} | Time: {time.time() - start_time:.1f}s")
         
         save_name = os.path.join(args.save_path, f"sam_depthclip_epoch_{epoch+1}.pth")
         torch.save(model.state_dict(), save_name)
