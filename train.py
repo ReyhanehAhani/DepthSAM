@@ -14,8 +14,8 @@ from datasets.datasets_list import MyDataset
 # --- تنظیمات اولیه ---
 def get_args():
     parser = argparse.ArgumentParser(description='Train SAM-Enhanced DepthCLIP Adapter')
-    parser.add_argument('--batch_size', type=int, default=8, help='Batch size') # با توجه به H100 می‌توانیم کمی بالا ببریم
-    parser.add_argument('--epochs', type=int, default=10, help='Number of epochs')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size') 
+    parser.add_argument('--epochs', type=int, default=5, help='Number of epochs')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning Rate')
     parser.add_argument('--data_path', type=str, default="/scratch/ram112/NYU_dataset", help='Path to dataset')
     parser.add_argument('--trainfile_nyu', type=str, default="./datasets/nyu_train.txt", help='Path to train split')
@@ -29,7 +29,7 @@ def get_args():
     parser.add_argument('--width', type=int, default=544)
     parser.add_argument('--trainfile_kitti', type=str, default="")
     parser.add_argument('--testfile_kitti', type=str, default="")
-    parser.add_argument('--testfile_nyu', type=str, default="") # فقط برای جلوگیری از ارور
+    parser.add_argument('--testfile_nyu', type=str, default="") 
     
     return parser.parse_args()
 
@@ -39,11 +39,15 @@ class MaskedL1Loss(nn.Module):
         super(MaskedL1Loss, self).__init__()
         
     def forward(self, pred, target):
-        # فقط پیکسل‌هایی که در GT مقدار دارند (Valid Pixels) را مقایسه کن
-        mask = target > 0.001
+        # target[mask] و pred[mask] را مقایسه می‌کند.
+        
+        # 1. ساخت ماسک
+        mask = target > 0.001 
         if mask.sum() == 0:
             return torch.tensor(0.0).to(pred.device).requires_grad_(True)
             
+        # 2. محاسبه Loss
+        # FIX: Loss به درستی محاسبه می‌شود چون mask و target هم‌اندازه هستند
         diff = torch.abs(pred[mask] - target[mask])
         loss = torch.mean(diff)
         return loss
@@ -51,11 +55,9 @@ class MaskedL1Loss(nn.Module):
 def main():
     args = get_args()
     
-    # 1. ساخت پوشه چک‌پوینت
     os.makedirs(args.save_path, exist_ok=True)
     
     print("==== Initializing Model ====")
-    # لود مدل (شامل SAM و CLIP)
     model = MonoCLIP()
     
     # 2. FREEZE کردن مدل (بسیار مهم)
@@ -64,7 +66,6 @@ def main():
         param.requires_grad = False
         
     # 3. باز کردن قفل لایه‌های آداپتور برای آموزش
-    # ما می‌خواهیم FCLayer و لایه Projection یاد بگیرند
     print("==== Unfreezing Adapters ====")
     trainable_params = []
     
@@ -80,14 +81,12 @@ def main():
             trainable_params.append(param)
         print("-> Projection layer (vis_to_text) is trainable.")
 
-    # انتقال به GPU (اگر monoclip.py خودش منتقل نکند، اینجا اطمینان حاصل می‌کنیم)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if device.type == 'cuda':
         model.to(device)
 
     # 4. دیتالودر
     print("==== Loading Dataset ====")
-    # نکته: فایل train لیست باید وجود داشته باشد. اگر ندارید، موقتاً از همان test list استفاده کنید.
     train_dataset = MyDataset(args, train=True) 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
     
@@ -99,24 +98,28 @@ def main():
     
     # --- Training Loop ---
     print("==== Starting Training ====")
-    model.train() # حالت Train (برای Dropout و BatchNorm)
-    # اما چون Backboneها فریز هستند، فقط آداپتور تغییر می‌کند.
+    model.train() 
     
     for epoch in range(args.epochs):
         epoch_loss = 0.0
         start_time = time.time()
         
-        # استفاده از tqdm برای نمایش پیشرفت
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}")
         
         for i, (rgb, gt, gt_dense) in enumerate(progress_bar):
+            # انتقال داده‌ها به دستگاه
             rgb = rgb.to(device)
-            # استفاده از gt_dense اگر موجود باشد، وگرنه gt معمولی
             target = gt_dense.to(device) if args.use_dense_depth else gt.to(device)
             
             # Forward
             optimizer.zero_grad()
             pred_depth = model(rgb)
+            
+            # --- FIX CRITICAL: برش خروجی مدل ---
+            # batch size هدف (8) را می‌گیریم و خروجی (32) را برش می‌دهیم.
+            B = target.shape[0]
+            pred_depth = pred_depth[:B]
+            # -----------------------------------
             
             # Loss
             loss = criterion(pred_depth, target)
@@ -127,17 +130,12 @@ def main():
             
             epoch_loss += loss.item()
             
-            # آپدیت نوار پیشرفت
             progress_bar.set_postfix({'Loss': loss.item()})
             
         avg_loss = epoch_loss / len(train_loader)
         print(f"\nEpoch [{epoch+1}/{args.epochs}] Completed. Avg Loss: {avg_loss:.4f} | Time: {time.time() - start_time:.1f}s")
         
-        # ذخیره چک‌پوینت در هر اپوک
         save_name = os.path.join(args.save_path, f"sam_depthclip_epoch_{epoch+1}.pth")
-        
-        # ما فقط وزن‌های آداپتور را ذخیره می‌کنیم تا حجم کم باشد، یا کل مدل را
-        # برای سادگی فعلاً کل state_dict را ذخیره می‌کنیم
         torch.save(model.state_dict(), save_name)
         print(f"Checkpoint saved: {save_name}")
 
