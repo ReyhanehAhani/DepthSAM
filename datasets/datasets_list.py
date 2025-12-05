@@ -10,7 +10,7 @@ from PIL import ImageFile
 from transform_list import RandomCropNumpy, EnhancedCompose, RandomColor, RandomHorizontalFlip, ArrayToTensorNumpy, Normalize, CropNumpy
 from torchvision import transforms
 import pdb
-import os  # FIX: اضافه شدن os برای مدیریت مسیرها
+import os 
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -45,12 +45,9 @@ class MyDataset(data.Dataset):
         self.transform = Transformer(args)
         self.args = args
 
-        # --- FIX: مدیریت صحیح مسیرها برای جلوگیری از Hardcoding ---
         if train:
-            # در حالت آموزش معمولاً پوشه train اضافه می‌شود
             self.data_path = self.args.data_path + '/train'
         else:
-            # در حالت تست، دقیقاً از مسیر ورودی استفاده می‌کنیم
             self.data_path = self.args.data_path
         
         self.return_filename = return_filename
@@ -59,30 +56,24 @@ class MyDataset(data.Dataset):
         self.fileset = sorted(self.fileset)
 
     def __getitem__(self, index):
-        # --- FIX: خواندن ایمن خطوط فایل لیست (جلوگیری از IndexError) ---
         line = self.fileset[index].strip()
         divided_file = [f.strip() for f in line.split() if f.strip()]
 
         if len(divided_file) < 2:
-            # اگر خط خراب بود، تلاش می‌کنیم خطا ندهد و رد شود یا ارور واضح بدهد
             raise IndexError(f"List line is incomplete: {line}")
 
         rgb_name = divided_file[0]
         gt_name = divided_file[1]
 
-        # ساخت مسیر کامل فایل RGB
         rgb_file = os.path.join(self.data_path, rgb_name)
         rgb = Image.open(rgb_file)
         
         gt = False
         gt_dense = False
 
-        # --- استخراج ID فایل (نام بدون پسوند) ---
-        # این کار برای ذخیره نتایج با نام درست ضروری است
         filename = rgb_name.split(".")[0].strip()
 
         if self.train is False:
-            # --- حالت TEST ---
             if self.args.dataset == 'KITTI':
                 if gt_name != 'None':
                     gt_file = os.path.join(self.data_path, 'data_depth_annotated', gt_name)
@@ -91,7 +82,6 @@ class MyDataset(data.Dataset):
                         gt_dense_file = os.path.join(self.data_path, 'data_depth_annotated', divided_file[2])
                         gt_dense = Image.open(gt_dense_file)
             elif self.args.dataset == 'NYU':
-                # مسیردهی ساده برای NYU Test
                 gt_file = os.path.join(self.data_path, gt_name)
                 gt = Image.open(gt_file)
                 if self.use_dense_depth is True:
@@ -99,7 +89,6 @@ class MyDataset(data.Dataset):
                     gt_dense = Image.open(gt_dense_file)
 
         else:
-            # --- حالت TRAIN ---
             angle = np.random.uniform(self.angle_range[0], self.angle_range[1])
             if self.args.dataset == 'KITTI':
                 gt_file = os.path.join(self.data_path, 'data_depth_annotated', gt_name)
@@ -117,7 +106,6 @@ class MyDataset(data.Dataset):
                 gt_dense = Image.open(gt_dense_file)
                 gt_dense = gt_dense.rotate(angle, resample=Image.NEAREST)
 
-        # --- منطق Crop و تنظیم ابعاد ---
         if self.args.dataset == 'KITTI':
             h = rgb.height
             w = rgb.width
@@ -142,10 +130,6 @@ class MyDataset(data.Dataset):
         else:
             rgb = rgb.crop((bound_left, bound_top, bound_right, bound_bottom))
 
-        # ذخیره موقت برای دیباگ (اختیاری)
-        # rgb.save("vis.jpeg")
-
-        # تبدیل به Numpy و تقسیم بر 255 (تبدیل به بازه 0-1)
         rgb = np.asarray(rgb, dtype=np.float32) / 255.0
 
         if _is_pil_image(gt):
@@ -162,9 +146,19 @@ class MyDataset(data.Dataset):
                 gt_dense = np.clip(gt_dense, 0, self.args.max_depth)
                 gt_dense = gt_dense * (gt.max() / gt_dense.max())
 
-        # اعمال Transforms نهایی (شامل Normalization)
+        # اعمال Transforms
         rgb, gt, gt_dense = self.transform([rgb] + [gt] + [gt_dense], self.train)
         
+        # --- DEBUG DATA CHECK (Added by Gemini) ---
+        if index == 0:
+            print(f"\n========== DEBUG DATA CHECK (Index {index}) ==========")
+            print(f"RGB Shape: {rgb.shape}")
+            print(f"RGB Min: {rgb.min():.4f}, RGB Max: {rgb.max():.4f}")
+            print(f"RGB Mean: {rgb.mean():.4f} (Goal: ~0.0 for normalized, ~0.5 for raw)")
+            print(f"RGB Std:  {rgb.std():.4f} (Goal: ~1.0 for normalized, ~0.2 for raw)")
+            print("====================================================\n")
+        # ------------------------------------------
+
         if self.return_filename is True:
             return rgb, gt, gt_dense, filename
         else:
@@ -198,15 +192,10 @@ class Transformer(object):
                 [Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), None, None]
             ])
             
-            # --- FIX CRITICAL: تنظیم درست برای تست NYU ---
+            # --- FIX: فراخوانی صحیح نرمال‌سازی ---
             self.test_transform = EnhancedCompose([
-                # CropNumpy((args.height,args.width)), # معمولاً در تست NYU کراپ نمی‌کنیم
                 ArrayToTensorNumpy(),
-                
-                # نکته مهم: Normalize باید به عنوان یک تابع مستقل باشد، نه داخل لیست [ ] با None
-                # چون کلاس EnhancedCompose ماژول‌های داخل لیست را فقط روی عضو متناظر اجرا می‌کند
-                # اما Normalize ما (در transform_list.py) طوری نوشته شده که کل لیست تصاویر را می‌گیرد
-                # و فقط روی RGB اعمال می‌کند. پس باید به تنهایی پاس داده شود.
+                # Normalize باید اینجا تنها باشد، نه داخل لیست
                 Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ])
 
