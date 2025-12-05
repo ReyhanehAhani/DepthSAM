@@ -11,7 +11,7 @@ from tqdm import tqdm
 from monoclip import MonoCLIP
 from datasets.datasets_list import MyDataset
 
-# --- تابع Argument Parser (با آرگومان‌های صحیح) ---
+# --- تابع Argument Parser (آرگومان‌ها) ---
 def get_args():
     parser = argparse.ArgumentParser(description='Train SAM-Enhanced DepthCLIP Adapter')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size') 
@@ -42,14 +42,14 @@ class MaskedL1Loss(nn.Module):
         mask = target > 0.001
         
         if mask.sum() == 0:
-            # FIX 1: تانسور خالی با requires_grad=True
+            # FIX: تانسور خالی با requires_grad=True
             return torch.tensor(0.0, device=pred.device).requires_grad_(True)
             
         diff = torch.abs(pred[mask] - target[mask])
         
         loss = torch.mean(diff)
         
-        # FIX 2 (CRITICAL): اطمینان از ردیابی گرادیان در تانسور Loss
+        # FIX: اطمینان از ردیابی گرادیان در تانسور Loss
         if not loss.requires_grad:
              loss.requires_grad_(True) 
 
@@ -64,7 +64,7 @@ def main():
     print("==== Initializing Model ====")
     model = MonoCLIP()
     
-    # 2. FREEZE کردن مدل
+    # 2. FREEZE کردن مدل 
     print("==== Freezing Backbones ====")
     for param in model.parameters():
         param.requires_grad = False
@@ -117,16 +117,16 @@ def main():
             optimizer.zero_grad()
             
             # --- FIX: Forward Pass با تضمین گرادیان و برش خروجی ---
-            # استفاده از torch.set_grad_enabled(True) برای حل مشکل DP/Frozen Layer
-            with torch.set_grad_enabled(True):
-                pred_depth = model(rgb)
-                
-                # برش خروجی (Fix 1: Batch Size Mismatch)
-                B = target.shape[0]
-                pred_depth = pred_depth[:B]
-                
-                # Loss
-                loss = criterion(pred_depth, target)
+            # حذف torch.set_grad_enabled(True) از اینجا ضروری نیست، اما
+            # با حذف torch.no_grad() از monoclip.py، این خط الان باید به درستی کار کند.
+            pred_depth = model(rgb)
+            
+            # برش خروجی (Fix Batch Size Mismatch)
+            B = target.shape[0]
+            pred_depth = pred_depth[:B]
+            
+            # Loss
+            loss = criterion(pred_depth, target)
             # --------------------------------------------------------
 
             # Backward
