@@ -43,7 +43,7 @@ cd /home/ram112/projects/def-jieliang/ram112/All_DEPTHCLIP/DepthCLIP/DepthCLIP_c
 echo "==== Starting Training ===="
 python3 train.py \
   --batch_size 8 \
-  --epochs 20 \
+  --epochs 50 \
   --lr 1e-4 \
   --data_path "/scratch/ram112/NYU_dataset" \
   --trainfile_nyu "./datasets/my_test_list.txt" \
