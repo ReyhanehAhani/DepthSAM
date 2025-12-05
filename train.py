@@ -11,17 +11,17 @@ from tqdm import tqdm
 from monoclip import MonoCLIP
 from datasets.datasets_list import MyDataset
 
-# --- تنظیمات اولیه ---
+# --- تابع Argument Parser (با آرگومان‌های صحیح) ---
 def get_args():
     parser = argparse.ArgumentParser(description='Train SAM-Enhanced DepthCLIP Adapter')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size') 
     parser.add_argument('--epochs', type=int, default=5, help='Number of epochs')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning Rate')
     parser.add_argument('--data_path', type=str, default="/scratch/ram112/NYU_dataset", help='Path to dataset')
-    parser.add_argument('--trainfile_nyu', type=str, default="./datasets/nyu_train.txt", help='Path to train split')
+    parser.add_argument('--trainfile_nyu', type=str, default="./datasets/my_test_list.txt", help='Path to train split') 
     parser.add_argument('--save_path', type=str, default="./checkpoints_trained", help='Where to save checkpoints')
     
-    # آرگومان‌های مورد نیاز MyDataset (که در کد اصلی استفاده می‌شوند)
+    # آرگومان‌های مورد نیاز MyDataset
     parser.add_argument('--dataset', type=str, default='NYU')
     parser.add_argument('--use_dense_depth', action='store_true', default=True)
     parser.add_argument('--max_depth', type=float, default=10.0)
@@ -39,19 +39,23 @@ class MaskedL1Loss(nn.Module):
         super(MaskedL1Loss, self).__init__()
         
     def forward(self, pred, target):
-        # target[mask] و pred[mask] را مقایسه می‌کند.
+        mask = target > 0.001
         
-        # 1. ساخت ماسک
-        mask = target > 0.001 
         if mask.sum() == 0:
-            return torch.tensor(0.0).to(pred.device).requires_grad_(True)
+            # FIX 1: تانسور خالی با requires_grad=True
+            return torch.tensor(0.0, device=pred.device).requires_grad_(True)
             
-        # 2. محاسبه Loss
-        # FIX: Loss به درستی محاسبه می‌شود چون mask و target هم‌اندازه هستند
         diff = torch.abs(pred[mask] - target[mask])
+        
         loss = torch.mean(diff)
+        
+        # FIX 2 (CRITICAL): اطمینان از ردیابی گرادیان در تانسور Loss
+        if not loss.requires_grad:
+             loss.requires_grad_(True) 
+
         return loss
 
+# --- Main Function ---
 def main():
     args = get_args()
     
@@ -60,12 +64,12 @@ def main():
     print("==== Initializing Model ====")
     model = MonoCLIP()
     
-    # 2. FREEZE کردن مدل (بسیار مهم)
+    # 2. FREEZE کردن مدل
     print("==== Freezing Backbones ====")
     for param in model.parameters():
         param.requires_grad = False
         
-    # 3. باز کردن قفل لایه‌های آداپتور برای آموزش
+    # 3. باز کردن قفل لایه‌های آداپتور
     print("==== Unfreezing Adapters ====")
     trainable_params = []
     
@@ -107,23 +111,24 @@ def main():
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}")
         
         for i, (rgb, gt, gt_dense) in enumerate(progress_bar):
-            # انتقال داده‌ها به دستگاه
             rgb = rgb.to(device)
             target = gt_dense.to(device) if args.use_dense_depth else gt.to(device)
             
-            # Forward
             optimizer.zero_grad()
-            pred_depth = model(rgb)
             
-            # --- FIX CRITICAL: برش خروجی مدل ---
-            # batch size هدف (8) را می‌گیریم و خروجی (32) را برش می‌دهیم.
-            B = target.shape[0]
-            pred_depth = pred_depth[:B]
-            # -----------------------------------
-            
-            # Loss
-            loss = criterion(pred_depth, target)
-            
+            # --- FIX: Forward Pass با تضمین گرادیان و برش خروجی ---
+            # استفاده از torch.set_grad_enabled(True) برای حل مشکل DP/Frozen Layer
+            with torch.set_grad_enabled(True):
+                pred_depth = model(rgb)
+                
+                # برش خروجی (Fix 1: Batch Size Mismatch)
+                B = target.shape[0]
+                pred_depth = pred_depth[:B]
+                
+                # Loss
+                loss = criterion(pred_depth, target)
+            # --------------------------------------------------------
+
             # Backward
             loss.backward()
             optimizer.step()
