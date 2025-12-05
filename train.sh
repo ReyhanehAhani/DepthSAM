@@ -2,7 +2,7 @@
 #SBATCH --job-name=SAM3_Train_Adapter
 #SBATCH --output=slurm_logs_train/train_%j.out
 #SBATCH --error=slurm_logs_train/train_%j.err
-#SBATCH --time=03:00:00
+#SBATCH --time=10:00:00
 #SBATCH --account=def-jieliang
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
