@@ -14,8 +14,7 @@ except ImportError as e:
     sys.exit(1)
 
 # --- تنظیمات دستگاه ---
-# برای جلوگیری از پر شدن حافظه GPU هنگام لود اولیه، مدل را روی CPU لود می‌کنیم
-LOAD_DEVICE = 'cpu'
+LOAD_DEVICE = 'cpu' # لود اولیه روی CPU برای جلوگیری از OOM
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # --- تنظیمات مسیر و مدل ---
@@ -33,7 +32,6 @@ class SAM3Encoder(nn.Module):
         super().__init__()
         print(f"Loading SAM 3 Image Model from: {checkpoint_path}")
         
-        # 1. لود مدل روی CPU برای مدیریت حافظه
         self.model = build_sam3_image_model(
             checkpoint_path=checkpoint_path,
             device=LOAD_DEVICE,  
@@ -42,11 +40,9 @@ class SAM3Encoder(nn.Module):
             enable_inst_interactivity=False
         )
         
-        # 2. انتقال به GPU اگر موجود باشد
         if DEVICE == 'cuda':
             self.model.to(DEVICE)
 
-        # 3. پیدا کردن اینکودر تصویر (Smart Backbone Detection)
         if hasattr(self.model.backbone, 'visual'):
             self.image_encoder = self.model.backbone.visual
         elif hasattr(self.model.backbone, 'trunk'):
@@ -54,30 +50,23 @@ class SAM3Encoder(nn.Module):
         else:
             self.image_encoder = self.model.backbone
         
-        # فریز کردن کامل SAM
         for param in self.model.parameters():
             param.requires_grad = False
 
     def forward(self, x):
-        """
-        ورودی: تنسور تصویر (B, 3, H, W)
-        """
         batch_size = x.shape[0]
         dummy_captions = [''] * batch_size
         
-        # تغییر سایز برای RoPE (معمولاً SAM روی ۱۰۲۴ یا ۱۰۰۸ کار می‌کند)
         if x.shape[-2:] != (1008, 1008):
             x_in = F.interpolate(x, size=(1008, 1008), mode='bilinear', align_corners=False)
         else:
             x_in = x
 
-        # هندل کردن ورودی‌های مختلف مدل (با یا بدون caption)
         try:
             features = self.image_encoder(x_in, captions=dummy_captions)
         except TypeError:
             features = self.image_encoder(x_in)
         
-        # استخراج ویژگی نهایی از خروجی‌های چندگانه
         if isinstance(features, dict):
             last_key = list(features.keys())[-1]
             return features[last_key]
@@ -87,43 +76,61 @@ class SAM3Encoder(nn.Module):
         return features
 
 def get_text_features(clip_model, depth_classes, obj_classes, templates):
-    """
-    تولید ویژگی‌های متنی CLIP برای کلاس‌های عمق.
-    """
     zeroshot_weights = []
-    with torch.no_grad(): # محاسبه فقط یکبار انجام می‌شود
+    with torch.no_grad():
         for depth in depth_classes:
             for obj in obj_classes:
                 texts = [template.format(obj, depth) for template in templates]
                 texts = clip.tokenize(texts).to(DEVICE)
-                
-                # استفاده از float32 برای دقت بالا
                 class_embeddings = clip_model.encode_text(texts).to(torch.float32) 
-                
                 class_embeddings /= class_embeddings.norm(dim=-1, keepdim=True)
                 class_embedding = class_embeddings.mean(dim=0)
                 class_embedding /= class_embedding.norm()
                 zeroshot_weights.append(class_embedding)
     
-    # استک کردن و جدا کردن از گراف محاسباتی (Detached)
     zeroshot_weights = torch.stack(zeroshot_weights, dim=1).to(DEVICE).to(torch.float32)
     return zeroshot_weights
 
-class FCLayer(nn.Module):
+class DepthAdapterCNN(nn.Module):
     """
-    لایه آداپتور ساده (MLP)
+    آداپتور جدید مبتنی بر CNN برای درک ویژگی‌های مکانی (Spatial Features).
+    جایگزین FCLayer قدیمی شد.
     """
     def __init__(self, c_in, reduction=4):
-        super(FCLayer, self).__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(c_in, c_in // reduction, bias=False),
+        super(DepthAdapterCNN, self).__init__()
+        
+        reduced_dim = max(c_in // reduction, 64) # جلوگیری از خیلی کوچک شدن ابعاد
+        
+        self.adapter = nn.Sequential(
+            # 1. کاهش ابعاد (1x1 Conv)
+            nn.Conv2d(c_in, reduced_dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(reduced_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(c_in // reduction, c_in, bias=False),
-            nn.ReLU(inplace=True)
+            
+            # 2. درک مکانی (3x3 Conv) -> اینجاست که عمق فهمیده میشه
+            nn.Conv2d(reduced_dim, reduced_dim, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(reduced_dim),
+            nn.ReLU(inplace=True),
+            
+            # 3. بازیابی ابعاد (1x1 Conv)
+            nn.Conv2d(reduced_dim, c_in, kernel_size=1, bias=False),
+            nn.BatchNorm2d(c_in)
+            # نکته: ReLU آخر رو برمیداریم تا بتونه مقادیر منفی رو هم در Residual اصلاح کنه
         )
+        
+        # مقداردهی اولیه وزن‌ها برای شروع نرم (نزدیک به صفر)
+        # این باعث میشه در شروع کار، تاثیر آداپتور کم باشه و مدل منفجر نشه
+        nn.init.constant_(self.adapter[-1].weight, 0) 
 
     def forward(self, x):
-        return self.fc(x)
+        # ورودی معمولاً به شکل (B, H, W, C) است
+        # کانولوشن نیاز به (B, C, H, W) دارد
+        
+        x = x.permute(0, 3, 1, 2) # تبدیل به فرمت کانال-اول
+        x = self.adapter(x)
+        x = x.permute(0, 2, 3, 1) # برگرداندن به فرمت کانال-آخر
+        
+        return x
 
 class MonoCLIP(nn.Module):
     def __init__(self):
@@ -133,31 +140,35 @@ class MonoCLIP(nn.Module):
         print("Loading CLIP (RN50) for text encoding...")
         self.clip_model, _ = clip.load("RN50", device=LOAD_DEVICE)
         
-        # فریز کردن CLIP
         for param in self.clip_model.parameters():
             param.requires_grad = False
             
         if DEVICE == 'cuda':
             self.clip_model.to(DEVICE)
 
-        # محاسبه ویژگی‌های متنی (فیکس شده)
         self.text_f = get_text_features(self.clip_model, depth_classes, obj_classes, depth_templates)
         self.text_dim = 1024
 
-        # لود SAM Encoder
         self.sam_encoder = SAM3Encoder(SAM3_CHECKPOINT)
         
-        # بررسی ابعاد خروجی SAM برای ساخت آداپتور
+        # چک کردن سایز خروجی
         dummy = torch.randn(1, 3, 1008, 1008).to(DEVICE)
         with torch.no_grad():
             out = self.sam_encoder(dummy)
         
-        self.visual_dim = out.shape[-1] # فرض بر این است که کانال در دایمنشن آخر است
+        # اگر خروجی 3 بعدی بود (Batch, Seq, Dim)، باید سایز تصویر رو حدس بزنیم
+        if out.dim() == 3:
+            self.visual_dim = out.shape[-1]
+            # معمولاً SAM3 خروجی 64x64 میده اگر ورودی 1024 باشه (Patch Size 16)
+            self.spatial_size = int(out.shape[1] ** 0.5) 
+        else:
+            self.visual_dim = out.shape[1] # اگر (B, C, H, W) باشه
+            
         print(f"✅ SAM 3 Output Shape: {out.shape}")
         print(f"✅ Visual Dimension: {self.visual_dim}")
 
-        # --- تعریف لایه‌های قابل آموزش ---
-        self.adapter = FCLayer(self.visual_dim).to(DEVICE)
+        # --- استفاده از آداپتور CNN جدید ---
+        self.adapter = DepthAdapterCNN(self.visual_dim).to(DEVICE)
         
         if self.visual_dim != self.text_dim:
             self.vis_to_text = nn.Linear(self.visual_dim, self.text_dim, bias=False).to(DEVICE)
@@ -165,50 +176,41 @@ class MonoCLIP(nn.Module):
             self.vis_to_text = nn.Identity()
 
     def forward(self, x):
-        # 1. استخراج ویژگی از SAM (فریز شده)
+        # 1. فیچرها از SAM
         img_f = self.sam_encoder(x)
-        
-        # 2. تبدیل به float32 برای پایداری محاسبات و جلوگیری از NaN
         img_f = img_f.to(torch.float32)
 
+        # 2. استاندارد سازی شکل تنسور به (B, H, W, C)
+        if img_f.dim() == 3: # اگر (B, Seq, C) بود
+            B, Seq, C = img_f.shape
+            H = W = int(Seq ** 0.5)
+            img_f = img_f.view(B, H, W, C)
+        elif img_f.dim() == 4 and img_f.shape[1] == self.visual_dim: # اگر (B, C, H, W) بود
+            img_f = img_f.permute(0, 2, 3, 1)
+
+        # 3. نرمال‌سازی اولیه
+        img_f = img_f / (img_f.norm(dim=-1, keepdim=True) + 1e-6)
+
         # -----------------------------------------------------------
-        # 🔥 FIX CRITICAL: اعمال آداپتور به صورت Residual
-        # این خط باعث می‌شود گرادیان جریان پیدا کند و لاس کم شود
+        # 🔥 CNN ADAPTER (Residual)
         # -----------------------------------------------------------
         img_f = img_f + self.adapter(img_f)
-        
-        # 3. نرمال‌سازی و تغییر شکل (Reshape)
-        # اگر خروجی 3 بعدی است (B, Seq, Dim) تبدیل به فرمت تصویر (B, H, W, Dim)
-        if img_f.dim() == 3:
-            # فرض بر این است که spatial dimension فشرده شده است، اینجا باز می‌کنیم
-            # نکته: اگر لاجیک خاصی برای SAM3 دارید اینجا چک کنید. 
-            # در کد قبلی شما اینطور بود:
-            img_f = img_f.transpose(1, 2)  # (B, Dim, Seq)
-            img_f = img_f.unsqueeze(-1)    # (B, Dim, Seq, 1) - تبدیل موقت به 4D
-        
-        img_f = img_f / (img_f.norm(dim=1, keepdim=True) + 1e-6)
-
-        # تبدیل به فرمت (B, H, W, C) برای عبور از لایه‌های خطی
-        if img_f.shape[1] == self.visual_dim: # اگر کانال در دایمنشن 1 است
-             img_f = img_f.permute(0, 2, 3, 1) 
         
         # 4. پروجکشن به فضای متن
         img_f = self.vis_to_text(img_f)
         
-        # 5. محاسبه امتیاز عمق (شباهت تصویر و متن)
+        # 5. محاسبه عمق
         depth_logits = 100. * img_f @ self.text_f
         
-        # آماده‌سازی برای Softmax (B, Classes, H, W)
+        # تبدیل به (B, Classes, H, W) برای Softmax
         depth_logits = depth_logits.permute(0, 3, 1, 2)
         
         depth_logits /= temperature
         depth_probs = F.softmax(depth_logits, dim=1)
         
-        # 6. محاسبه نقشه عمق نهایی (Weighted Sum)
         bin_tensor = torch.tensor(bin_list).to(depth_probs.device)
         depth_map = (depth_probs * bin_tensor.view(1, -1, 1, 1)).sum(dim=1, keepdim=True)
         
-        # 7. بازگرداندن به سایز اصلی تصویر ورودی
         if depth_map.shape[-2:] != x.shape[-2:]:
             depth_map = F.interpolate(depth_map, size=x.shape[-2:], mode='bilinear', align_corners=False)
 

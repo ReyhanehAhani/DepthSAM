@@ -9,7 +9,7 @@ from tqdm import tqdm
 import sys
 
 # ایمپورت کردن ماژول‌های پروژه
-# فرض بر این است که فایل monoclip.py در همین پوشه است
+# فرض بر این است که monoclip.py و پوشه datasets در کنار این فایل هستند
 from monoclip import MonoCLIP
 from datasets.datasets_list import MyDataset
 
@@ -18,7 +18,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='Train SAM-Enhanced DepthCLIP Adapter')
     
     # تنظیمات آموزش
-    parser.add_argument('--batch_size', type=int, default=8, help='Batch size') 
+    parser.add_argument('--batch_size', type=int, default=4, help='Batch size (Low for H100 Slice)') 
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning Rate') 
     
@@ -36,10 +36,10 @@ def get_args():
     
     return parser.parse_args()
 
-# --- 2. توابع زیان پیشرفته (Composite Loss) ---
+# --- 2. توابع زیان (Loss Functions) ---
 
 class GradientLoss(nn.Module):
-    """محاسبه خطای گرادیان برای حفظ لبه‌ها و ساختار تصویر"""
+    """محاسبه خطای گرادیان برای حفظ لبه‌ها"""
     def __init__(self):
         super(GradientLoss, self).__init__()
 
@@ -60,7 +60,7 @@ class GradientLoss(nn.Module):
         return loss_dx + loss_dy
 
 class CompositeLoss(nn.Module):
-    """ترکیب L1 Loss و Gradient Loss - نسخه اصلاح شده"""
+    """ترکیب L1 Loss و Gradient Loss"""
     def __init__(self, alpha=1.0, beta=0.5):
         super(CompositeLoss, self).__init__()
         self.l1_loss = nn.L1Loss(reduction='none') 
@@ -72,8 +72,7 @@ class CompositeLoss(nn.Module):
         mask = target > 0.001
         
         if mask.sum() == 0:
-            # برگرداندن صفر با گرادیان فعال برای جلوگیری از کرش
-            return (pred * 0.0).sum()
+            return (pred * 0.0).sum() # بازگرداندن صفر با حفظ گراف محاسباتی
 
         # محاسبه L1
         pixel_loss = self.l1_loss(pred, target)
@@ -85,10 +84,9 @@ class CompositeLoss(nn.Module):
         total_loss = (self.alpha * pixel_loss) + (self.beta * edge_loss)
         
         # --- SAFETY CHECK ---
-        # اینجا دیگر دستی requires_grad را True نمی‌کنیم.
-        # اگر True نباشد یعنی مدل قطع است و باید ارور بدهد.
+        # اگر گرادیان قطع باشد، اینجا ارور می‌دهد تا وقت تلف نشود
         if not total_loss.requires_grad:
-            raise RuntimeError("ERROR: Loss has no gradient flow! Check model connectivity.")
+            raise RuntimeError("❌ ERROR: Loss has no gradient! Check model connectivity.")
 
         return total_loss
 
@@ -96,16 +94,23 @@ class CompositeLoss(nn.Module):
 def main():
     args = get_args()
     
+    # --- Fail Fast Check: جلوگیری از اجرا روی CPU ---
+    if not torch.cuda.is_available():
+        print("❌ CRITICAL ERROR: CUDA is not available!")
+        print("   -> Possible fix: Check SLURM script (remove CUDA_VISIBLE_DEVICES) or module load.")
+        sys.exit(1)
+        
+    device = torch.device('cuda')
+    print(f"==== Running on GPU: {torch.cuda.get_device_name(0)} ====")
+    
     os.makedirs(args.save_path, exist_ok=True)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"==== Running on {device} ====")
     
     print("==== Initializing Model ====")
     model = MonoCLIP()
     model.to(device)
     
     # --- مدیریت فریز/آن‌فریز ---
-    print("==== Configuriing Trainable Parameters ====")
+    print("==== Configuring Trainable Parameters ====")
     # 1. همه چیز را فریز کن
     for param in model.parameters():
         param.requires_grad = False
@@ -113,27 +118,25 @@ def main():
     # 2. فقط آداپتورها را باز کن
     trainable_params = []
     
-    # باز کردن Adapter (لایه Residual)
     if hasattr(model, 'adapter'):
         for name, param in model.adapter.named_parameters():
             param.requires_grad = True
             trainable_params.append(param)
         print("-> Adapter layer UNFROZEN.")
     else:
-        print("❌ CRITICAL WARNING: 'adapter' not found in model!")
+        print("❌ WARNING: 'adapter' layer not found in model!")
 
-    # باز کردن لایه پروجکشن (اگر Identity نباشد)
     if hasattr(model, 'vis_to_text') and not isinstance(model.vis_to_text, nn.Identity):
         for name, param in model.vis_to_text.named_parameters():
             param.requires_grad = True
             trainable_params.append(param)
         print("-> Projection layer (vis_to_text) UNFROZEN.")
 
-    # چک نهایی تعداد پارامترهای قابل آموزش
     num_trainable = sum(p.numel() for p in trainable_params)
     print(f"==== Total Trainable Parameters: {num_trainable} ====")
+    
     if num_trainable == 0:
-        print("❌ ERROR: No parameters to train! Exiting.")
+        print("❌ ERROR: No parameters to train! Check model definition.")
         sys.exit(1)
 
     # دیتالودر
@@ -149,7 +152,7 @@ def main():
     
     print(f"Training on {len(train_dataset)} images.")
 
-    # تنظیمات
+    # تنظیمات آموزش
     criterion = CompositeLoss(alpha=1.0, beta=0.5)
     optimizer = optim.AdamW(trainable_params, lr=args.lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -169,13 +172,12 @@ def main():
             rgb = rgb.to(device)
             target = gt_dense.to(device) if args.use_dense_depth else gt.to(device)
             
-            # پاک کردن گرادیان‌های قبلی
             optimizer.zero_grad()
             
             # Forward Pass
             pred_depth = model(rgb)
             
-            # اطمینان از تطابق سایز (برش در صورت ناهماهنگی Batch آخر)
+            # هندل کردن اختلاف سایز بچ آخر
             if pred_depth.shape[0] != target.shape[0]:
                 pred_depth = pred_depth[:target.shape[0]]
             
@@ -184,7 +186,7 @@ def main():
             # Backward Pass
             loss.backward()
             
-            # Gradient Clipping (برای پایداری)
+            # کلیپ کردن گرادیان برای پایداری
             torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
             
             optimizer.step()
@@ -194,10 +196,12 @@ def main():
             
         avg_loss = epoch_loss / len(train_loader)
         
+        # آپدیت Learning Rate
         current_lr = optimizer.param_groups[0]['lr']
         scheduler.step(avg_loss)
         
-        print(f"\nEpoch [{epoch+1}/{args.epochs}] Done. Avg Loss: {avg_loss:.4f} | LR: {current_lr:.6f} | Time: {time.time() - start_time:.1f}s")
+        duration = time.time() - start_time
+        print(f"\nEpoch [{epoch+1}/{args.epochs}] Done. Avg Loss: {avg_loss:.4f} | LR: {current_lr:.6f} | Time: {duration:.1f}s")
         
         # ذخیره مدل
         save_name = os.path.join(args.save_path, f"sam_depthclip_epoch_{epoch+1}.pth")
